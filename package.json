@@ -1,0 +1,17 @@
+{
+  "name": "basemetric-contracts",
+  "version": "0.1.0",
+  "description": "BaseMetric Phase 0 smart contracts (26 Aug r4 spec) - metal-neutral, DIA allowance model",
+  "license": "UNLICENSED",
+  "scripts": {
+    "build": "hardhat compile",
+    "test": "hardhat test"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "hardhat": "^2.22.10"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.0.2"
+  }
+}
