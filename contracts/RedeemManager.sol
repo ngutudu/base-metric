@@ -9,7 +9,7 @@ import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {BMTokenPOC} from "./BMTokenPOC.sol";
 import {Treasury} from "./Treasury.sol";
 import {BasemetricRegistry} from "./BasemetricRegistry.sol";
-import {LotState, NavQuote} from "./lib/BaseMetricTypes.sol";
+import {AllowanceState, LotState, NavQuote} from "./lib/BaseMetricTypes.sol";
 
 /// @title RedeemManager
 /// @notice Burns tokens against a NAMED lot (§A.3). The burn is separable from the
@@ -36,12 +36,13 @@ contract RedeemManager is Ownable, Pausable, EIP712 {
     event NavSignerSet(address navSigner);
     event RedeemFeeBpsSet(uint256 bps);
     event CeremonyEnabledSet(bool enabled);
-    event Burned(bytes32 indexed receiptId, address indexed redeemer, uint256 burnAmountKg6dec);
-    event CeremonySettled(bytes32 indexed receiptId, address indexed redeemer, uint256 usdcPayout);
+    event Burned(uint256 indexed intentId, address indexed redeemer, uint256 burnAmountKg6dec);
+    event CeremonySettled(uint256 indexed intentId, address indexed redeemer, uint256 usdcPayout);
     event DustBurned(address indexed from, uint256 amount);
 
     error NotWholeLot();
     error LotNotActive();
+    error LotNotMinted();
     error CeremonyDisabled();
     error BadNavSignature();
     error NavQuoteExpired();
@@ -82,25 +83,25 @@ contract RedeemManager is Ownable, Pausable, EIP712 {
 
     /// @notice Commercial path — burn only. No Treasury withdrawal.
     /// Caller burns their own tokens; settlement happens off-chain and later.
-    function redeem(bytes32 receiptId, uint256 burnAmountKg6dec) external whenNotPaused {
-        _burnLot(receiptId, burnAmountKg6dec);
+    function redeem(uint256 intentId, uint256 burnAmountKg6dec) external whenNotPaused {
+        _burnLot(intentId, burnAmountKg6dec);
     }
 
     /// @notice Phase 0 ceremony path — burn plus atomic USDC payout from Treasury.
     /// The payout is DERIVED from a signed NAV quote (round trip at the same NAV → zero
     /// delta, §H) — it is never caller-supplied, so a redeemer cannot over-withdraw.
-    function redeemCeremony(bytes32 receiptId, uint256 burnAmountKg6dec, NavQuote calldata navQuote, bytes calldata signature)
+    function redeemCeremony(uint256 intentId, uint256 burnAmountKg6dec, NavQuote calldata navQuote, bytes calldata signature)
         external
         whenNotPaused
     {
         if (!ceremonyEnabled) revert CeremonyDisabled();
         _verifyNavQuote(navQuote, signature);
 
-        _burnLot(receiptId, burnAmountKg6dec);
+        _burnLot(intentId, burnAmountKg6dec);
 
         uint256 usdcPayout = (burnAmountKg6dec * navQuote.navPriceUsdc6PerKg) / 1e6;
         treasury.withdraw(msg.sender, usdcPayout); // reverts if Treasury USDC is insufficient
-        emit CeremonySettled(receiptId, msg.sender, usdcPayout);
+        emit CeremonySettled(intentId, msg.sender, usdcPayout);
     }
 
     /// Safety valve for a token-leg rounding residual. Not a routine step (§A.3).
@@ -109,15 +110,20 @@ contract RedeemManager is Ownable, Pausable, EIP712 {
         emit DustBurned(msg.sender, amount);
     }
 
-    function _burnLot(bytes32 receiptId, uint256 burnAmountKg6dec) private {
-        BasemetricRegistry.Lot memory lot = registry.getLot(receiptId);
+    function _burnLot(uint256 intentId, uint256 burnAmountKg6dec) private {
+        BasemetricRegistry.Lot memory lot = registry.getLot(intentId);
         if (lot.lotState != LotState.Active) revert LotNotActive();
-        // redemption is whole-lot; recordLot enforces allowanceKg6dec == nettKg6dec
+        // A lot must actually have been minted before it can be redeemed — otherwise
+        // a holder could burn unrelated (fungible) tokens against a never-minted or
+        // revoked lot's bookkeeping slot, marking it Redeemed while its allowance is
+        // still Issued and mintable, corrupting the lot's state permanently.
+        if (lot.allowanceState != AllowanceState.Consumed) revert LotNotMinted();
+        // redemption is whole-lot
         if (burnAmountKg6dec != lot.nettKg6dec) revert NotWholeLot();
 
         token.burn(msg.sender, burnAmountKg6dec); // totalSupply() falls; real OZ _burn
-        registry.markLotRedeemed(receiptId);
-        emit Burned(receiptId, msg.sender, burnAmountKg6dec);
+        registry.markLotRedeemed(intentId);
+        emit Burned(intentId, msg.sender, burnAmountKg6dec);
     }
 
     function _verifyNavQuote(NavQuote calldata q, bytes calldata signature) private {

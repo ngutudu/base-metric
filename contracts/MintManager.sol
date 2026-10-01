@@ -43,7 +43,7 @@ contract MintManager is Ownable, Pausable, EIP712 {
     event NavSignerSet(address navSigner);
     event MintFeeBpsSet(uint256 bps);
     event MaxSettlementDriftSet(uint256 units);
-    event Minted(bytes32 indexed receiptId, address indexed recipient, uint256 mintAmountKg6dec, uint256 usdcAmount);
+    event Minted(uint256 indexed intentId, address indexed recipient, uint256 mintAmountKg6dec, uint256 usdcAmount);
 
     error NoIssuedAllowance();
     error ZeroMintAmount();
@@ -95,14 +95,14 @@ contract MintManager is Ownable, Pausable, EIP712 {
     }
 
     /// @notice Caller (the 3/3 Safe at Phase 0) must have approved this contract for `usdcAmount`.
-    function mint(bytes32 receiptId, uint256 usdcAmount, NavQuote calldata navQuote, bytes calldata signature)
+    function mint(uint256 intentId, uint256 usdcAmount, NavQuote calldata navQuote, bytes calldata signature)
         external
         whenNotPaused
     {
-        // 2. an allowance exists for receiptId and its state is Issued.
-        // Cheap pre-check on the registry cache; the adapter re-reads DIA live inside
-        // consumeAllowance() below, so a revoke landing after the last sync still blocks.
-        BasemetricRegistry.Lot memory lot = registry.getLot(receiptId);
+        // 2. an allowance exists for intentId and its state is Issued. A concurrent
+        // revoke is resolved by transaction ordering, not a live re-check (§B) — revoke
+        // is itself a verified on-chain write now, not a pull from an external contract.
+        BasemetricRegistry.Lot memory lot = registry.getLot(intentId);
         if (lot.allowanceState != AllowanceState.Issued) revert NoIssuedAllowance();
         address recipient = lot.allowanceRecipient;
 
@@ -116,8 +116,9 @@ contract MintManager is Ownable, Pausable, EIP712 {
         // 4. NAV quote signature valid + within its validity window
         _verifyNavQuote(navQuote, signature);
 
-        // Sizing rule (§A.2 / §H): the money follows the metal.
-        uint256 mintAmountKg6dec = lot.allowanceKg6dec;
+        // Sizing rule (§A.2 / §H): the money follows the metal. nettKg6dec IS the
+        // allowance amount — DIA attests a single quantity, sized 1:1 (Flow Brief §1.2).
+        uint256 mintAmountKg6dec = lot.nettKg6dec;
         if (mintAmountKg6dec == 0) revert ZeroMintAmount();
         uint256 usdcRequired = (mintAmountKg6dec * navQuote.navPriceUsdc6PerKg) / 1e6;
 
@@ -126,7 +127,7 @@ contract MintManager is Ownable, Pausable, EIP712 {
         if (drift > maxSettlementDrift) revert SettlementDriftTooLarge();
 
         // consume the allowance (only the adapter may write allowance state to the registry)
-        IOracleAdapter(registry.adapterForLot(receiptId)).consumeAllowance(receiptId);
+        IOracleAdapter(registry.adapterForLot(intentId)).consumeAllowance(intentId);
 
         // move USDC into Treasury
         usdc.safeTransferFrom(msg.sender, address(this), usdcAmount);
@@ -139,7 +140,7 @@ contract MintManager is Ownable, Pausable, EIP712 {
         // 6. post-mint assertion: totalSupply() <= registry.getReserve()
         if (token.totalSupply() > registry.getReserve()) revert PostMintReserveAssertion();
 
-        emit Minted(receiptId, recipient, mintAmountKg6dec, usdcAmount);
+        emit Minted(intentId, recipient, mintAmountKg6dec, usdcAmount);
     }
 
     function _verifyNavQuote(NavQuote calldata q, bytes calldata signature) private {
