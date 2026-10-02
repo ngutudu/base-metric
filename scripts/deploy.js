@@ -1,22 +1,30 @@
 const hre = require("hardhat");
+const fs = require("fs");
+const path = require("path");
 
 // Phase 0 deployment (§A): metal-neutral contracts, deployed for lead.
 // Push + verify-signature model, single EIP-712 signer per deployment, integer ids
 // (confirmed with DIA, 30 Sep) — see docs/contracts-and-data-requirements.md.
 async function main() {
   const ethers = hre.ethers;
-  const [deployer] = await ethers.getSigners();
+  // Distinct default signers (same ordering as test/flow.test.js) so a plain
+  // `npx hardhat run scripts/deploy.js --network localhost` gives the UI genuinely
+  // different accounts per role, not everything defaulting to the deployer.
+  const [deployer, navSigner, diaSigner, multisigSigner, safe, recipient, other, revoke1, revoke2, revoke3] =
+    await ethers.getSigners();
 
   const WAREHOUSE_ID = process.env.WAREHOUSE_ID || "1"; // Steinweg = 1, per DIA
   const USDC = process.env.USDC_ADDRESS;
-  const NAV_SIGNER = process.env.NAV_SIGNER || deployer.address;
+  const NAV_SIGNER = process.env.NAV_SIGNER || navSigner.address;
   // DIA's single EIP-712 attestor key — used for issue and final-release only.
-  const DIA_SIGNER = process.env.DIA_SIGNER || deployer.address;
+  const DIA_SIGNER = process.env.DIA_SIGNER || diaSigner.address;
   // 2-of-3 revoke signer set (Basemetric holds one seat), independent of DIA_SIGNER.
-  const REVOKE_SIGNERS = (process.env.REVOKE_SIGNERS || `${deployer.address},${deployer.address},${deployer.address}`)
+  const REVOKE_SIGNERS = (
+    process.env.REVOKE_SIGNERS || `${revoke1.address},${revoke2.address},${revoke3.address}`
+  )
     .split(",")
     .map((s) => s.trim());
-  const MULTISIG = process.env.MULTISIG || deployer.address;
+  const MULTISIG = process.env.MULTISIG || multisigSigner.address;
   const MAX_SETTLEMENT_DRIFT = process.env.MAX_SETTLEMENT_DRIFT || "10000"; // $0.01, §H
   const MAX_ATTESTATION_AGE = process.env.MAX_ATTESTATION_AGE; // seconds; default 24h in-contract
 
@@ -88,17 +96,42 @@ async function main() {
     await (await treasury.transferOwnership(MULTISIG)).wait();
   }
 
-  console.log({
-    registry: await registry.getAddress(),
-    token: await token.getAddress(),
-    treasury: await treasury.getAddress(),
-    adapter: await adapter.getAddress(),
-    mintManager: await mintManager.getAddress(),
-    redeemManager: await redeemManager.getAddress(),
-    diaSigner: DIA_SIGNER,
-    revokeSigners: REVOKE_SIGNERS,
+  const network = await ethers.provider.getNetwork();
+
+  const deployment = {
+    chainId: Number(network.chainId),
+    rpcUrl: process.env.RPC_URL || "http://127.0.0.1:8545",
     warehouseId: WAREHOUSE_ID,
-  });
+    contracts: {
+      usdc: usdcAddr,
+      registry: await registry.getAddress(),
+      token: await token.getAddress(),
+      treasury: await treasury.getAddress(),
+      adapter: await adapter.getAddress(),
+      mintManager: await mintManager.getAddress(),
+      redeemManager: await redeemManager.getAddress(),
+    },
+    roles: {
+      deployer: deployer.address,
+      navSigner: NAV_SIGNER,
+      diaSigner: DIA_SIGNER,
+      multisig: MULTISIG,
+      safe: safe.address,
+      recipient: recipient.address,
+      other: other.address,
+      revoke1: revoke1.address,
+      revoke2: revoke2.address,
+      revoke3: revoke3.address,
+    },
+  };
+
+  console.log(deployment);
+
+  // Write out for the test UI (ui/) — see ui/README.md.
+  const uiConfigPath = path.join(__dirname, "..", "ui", "src", "deployment.json");
+  fs.mkdirSync(path.dirname(uiConfigPath), { recursive: true });
+  fs.writeFileSync(uiConfigPath, JSON.stringify(deployment, null, 2));
+  console.log("Wrote UI config:", uiConfigPath);
 }
 
 main().catch((e) => {
